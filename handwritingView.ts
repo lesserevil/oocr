@@ -11,6 +11,8 @@ export class HandwritingView extends ItemView {
     private ocrService: OcrService;
     private plugin: OOCRPlugin;
     private resizeObserver: ResizeObserver;
+    private pressureValues: number[] = [];
+    private strokeLogs: string[] = [];
 
     constructor(leaf: WorkspaceLeaf, ocrService: OcrService, plugin: OOCRPlugin) {
         super(leaf);
@@ -54,6 +56,12 @@ export class HandwritingView extends ItemView {
             .setCta()
             .onClick(() => this.runOcrAndInsert());
 
+        // Debug Button (Temporary)
+        new ButtonComponent(toolbar)
+            .setButtonText("Save Img")
+            .setIcon("image-file")
+            .onClick(() => this.saveDebugImage());
+
         // Canvas Wrapper
         const canvasWrapper = container.createDiv({ cls: "handwriting-canvas-wrapper" });
 
@@ -76,46 +84,80 @@ export class HandwritingView extends ItemView {
     }
 
     setupDrawingEvents() {
-        const start = (e: MouseEvent | TouchEvent) => {
+        let lastX = 0;
+        let lastY = 0;
+
+        const start = (e: PointerEvent) => {
             e.preventDefault();
             this.isDrawing = true;
             const { x, y } = this.getCoords(e);
+            lastX = x;
+            lastY = y;
+
+            // Draw a single dot in case it's just a tap
             this.ctx?.beginPath();
+            this.ctx?.arc(x, y, this.ctx.lineWidth / 2, 0, Math.PI * 2);
+            this.ctx?.fill();
+            this.ctx?.beginPath(); // Reset path for moving
             this.ctx?.moveTo(x, y);
         };
 
-        const move = (e: MouseEvent | TouchEvent) => {
-            if (!this.isDrawing) return;
+        const move = (e: PointerEvent) => {
+            if (!this.isDrawing || !this.ctx) return;
             e.preventDefault();
+
+            // Handle pressure
+            const pressure = e.pressure !== undefined && e.pressure > 0 ? e.pressure : 0.5;
+            this.pressureValues.push(pressure);
+
+            const baseWidth = 4.5;
+            const dynamicWidth = baseWidth * (0.5 + pressure);
+
             const { x, y } = this.getCoords(e);
-            this.ctx?.lineTo(x, y);
-            this.ctx?.stroke();
+
+            // Draw segment
+            this.ctx.lineWidth = dynamicWidth;
+            this.ctx.beginPath();
+            this.ctx.moveTo(lastX, lastY);
+            this.ctx.lineTo(x, y);
+            this.ctx.stroke();
+
+            lastX = x;
+            lastY = y;
         };
 
-        const end = (e: MouseEvent | TouchEvent) => {
+        const end = (e: PointerEvent) => {
             if (!this.isDrawing) return;
             e.preventDefault();
             this.isDrawing = false;
-            this.ctx?.closePath();
+
+            if (this.pressureValues.length > 0) {
+                const unique = new Set(this.pressureValues).size;
+                const min = Math.min(...this.pressureValues).toFixed(3);
+                const max = Math.max(...this.pressureValues).toFixed(3);
+                const msg = `Stroke ${new Date().toISOString()}: ${this.pressureValues.length} pts, ${unique} unique levels. Range: ${min}-${max}`;
+                console.log(msg);
+                this.strokeLogs.push(msg);
+                this.pressureValues = [];
+            }
         };
 
-        // Mouse
-        this.canvas.addEventListener("mousedown", start);
-        this.canvas.addEventListener("mousemove", move);
-        this.canvas.addEventListener("mouseup", end);
-        this.canvas.addEventListener("mouseout", end);
-
-        // Touch
-        this.canvas.addEventListener("touchstart", start, { passive: false });
-        this.canvas.addEventListener("touchmove", move, { passive: false });
-        this.canvas.addEventListener("touchend", end, { passive: false });
+        // Pointer Events (Unified Mouse/Touch/Pen)
+        this.canvas.addEventListener("pointerdown", start as any);
+        this.canvas.addEventListener("pointermove", move as any);
+        this.canvas.addEventListener("pointerup", end as any);
+        this.canvas.addEventListener("pointerout", end as any);
+        this.canvas.addEventListener("pointercancel", end as any);
     }
 
-    getCoords(e: MouseEvent | TouchEvent) {
+    getCoords(e: PointerEvent | MouseEvent | TouchEvent) {
         const rect = this.canvas.getBoundingClientRect();
         let clientX, clientY;
 
-        if (window.TouchEvent && e instanceof TouchEvent) {
+        if (window.PointerEvent && e instanceof PointerEvent) {
+            clientX = e.clientX;
+            clientY = e.clientY;
+        } else if (window.TouchEvent && e instanceof TouchEvent) {
             clientX = e.touches[0].clientX;
             clientY = e.touches[0].clientY;
         } else if (e instanceof MouseEvent) {
@@ -140,26 +182,47 @@ export class HandwritingView extends ItemView {
         // Save content before resize clears it
         const prevContent = this.canvas.toDataURL();
 
-        this.canvas.width = rect.width;
-        this.canvas.height = rect.height;
+        // Handle High DPI displays (Retina, Android)
+        // This makes the canvas backing store larger than its CSS display size
+        const dpr = window.devicePixelRatio || 1;
+
+        this.canvas.width = rect.width * dpr;
+        this.canvas.height = rect.height * dpr;
+
+        // Ensure the canvas displays at the correct visual size
+        this.canvas.style.width = `${rect.width}px`;
+        this.canvas.style.height = `${rect.height}px`;
+
+        // Scale all drawing operations by dpr so logic remains in CSS pixels
+        this.ctx = this.canvas.getContext("2d");
+        this.ctx?.scale(dpr, dpr);
 
         this.setupContext();
 
         // Fill white background to ensure opacity
+        // Note: fillRect uses context coordinates, which are already scaled
         this.ctx!.fillStyle = "#FFFFFF";
-        this.ctx!.fillRect(0, 0, this.canvas.width, this.canvas.height);
+        this.ctx!.fillRect(0, 0, rect.width, rect.height);
 
         // Restore content
         const img = new Image();
         img.onload = () => {
-            this.ctx?.drawImage(img, 0, 0);
+            // Draw image at full resolution (it's already a DataURL of the previous state)
+            // We need to be careful here: if prevContent was low-res, it stays low-res.
+            // But going forward new strokes will be high-res.
+            // Since toDataURL returns the backing store resolution, 
+            // and we are drawing it into a new scaled context... 
+            // We usually want to draw it 1:1 with the backing store? 
+            // Actually, simply drawing it at 0,0 with requested width/height in CSS pixels 
+            // (which are scaled to backing pixels) works best to fit.
+            this.ctx?.drawImage(img, 0, 0, rect.width, rect.height);
         };
         img.src = prevContent;
     }
 
     setupContext() {
         if (!this.ctx) return;
-        this.ctx.lineWidth = 3;
+        this.ctx.lineWidth = 4.5;
         this.ctx.lineCap = "round";
         this.ctx.lineJoin = "round";
         this.ctx.strokeStyle = "#000000";
@@ -167,9 +230,57 @@ export class HandwritingView extends ItemView {
 
     clearCanvas() {
         if (!this.ctx) return;
-        this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
+
+        const dpr = window.devicePixelRatio || 1;
+        const rect = this.canvas.getBoundingClientRect();
+
+        // Use logical dimensions for drawing operations since context is scaled
+        this.ctx.clearRect(0, 0, rect.width, rect.height);
         this.ctx.fillStyle = "#FFFFFF";
-        this.ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
+        this.ctx.fillRect(0, 0, rect.width, rect.height);
+    }
+
+    // Helper to add white padding around the image for better Tesseract recognition
+    getPaddedImage(): string {
+        const padding = 20; // 20px padding (logical)
+        const dpr = window.devicePixelRatio || 1;
+        const width = this.canvas.width;
+        const height = this.canvas.height;
+
+        // Create temp canvas
+        const tempCanvas = document.createElement('canvas');
+        tempCanvas.width = width + (padding * 2 * dpr);
+        tempCanvas.height = height + (padding * 2 * dpr);
+
+        const tCtx = tempCanvas.getContext('2d');
+        if (!tCtx) return this.canvas.toDataURL("image/png");
+
+        // Fill white
+        tCtx.fillStyle = "#FFFFFF";
+        tCtx.fillRect(0, 0, tempCanvas.width, tempCanvas.height);
+
+        // Draw original canvas centered
+        tCtx.drawImage(this.canvas, padding * dpr, padding * dpr);
+
+        // Binarize (Threshold) the image to remove anti-aliasing (gray pixels)
+        // detailed OCR often works better with sharp black/white
+        const imageData = tCtx.getImageData(0, 0, tempCanvas.width, tempCanvas.height);
+        const data = imageData.data;
+        const threshold = 180; // Reverted to 180: Produced best results ("nace text for est")
+
+        for (let i = 0; i < data.length; i += 4) {
+            // Calculate grayscale brightness (r+g+b)/3
+            const brightness = (data[i] + data[i + 1] + data[i + 2]) / 3;
+            const val = brightness > threshold ? 255 : 0;
+
+            data[i] = val;     // R
+            data[i + 1] = val; // G
+            data[i + 2] = val; // B
+            // Alpha stays 255 (or whatever it was)
+        }
+        tCtx.putImageData(imageData, 0, 0);
+
+        return tempCanvas.toDataURL("image/png");
     }
 
     async runOcr() {
@@ -182,7 +293,7 @@ export class HandwritingView extends ItemView {
         new Notice("Processing handwriting...");
         try {
             // Get Data URL (default PNG)
-            const dataUrl = this.canvas.toDataURL("image/png");
+            const dataUrl = this.getPaddedImage();
             const text = await this.ocrService.recognize(dataUrl, { handwriting: true });
 
             if (text.trim()) {
@@ -208,7 +319,7 @@ export class HandwritingView extends ItemView {
         new Notice("Processing & Inserting...");
 
         try {
-            const dataUrl = this.canvas.toDataURL("image/png");
+            const dataUrl = this.getPaddedImage();
             const text = await this.ocrService.recognize(dataUrl, { handwriting: true });
 
             if (text.trim()) {
@@ -240,6 +351,35 @@ export class HandwritingView extends ItemView {
             new Notice("Recognition/Insert failed.");
         } finally {
             this.canvas.style.cursor = originalCursor;
+        }
+    }
+    async saveDebugImage() {
+        try {
+            const dataUrl = this.getPaddedImage();
+            const base64Data = dataUrl.split(',')[1];
+
+            // Convert to binary (Android compatible)
+            const binaryStr = window.atob(base64Data);
+            const len = binaryStr.length;
+            const bytes = new Uint8Array(len);
+            for (let i = 0; i < len; i++) {
+                bytes[i] = binaryStr.charCodeAt(i);
+            }
+
+            // Save to file in vault root
+            const timestamp = Date.now();
+            const filename = `debug_ocr_${timestamp}.png`;
+            await this.app.vault.adapter.writeBinary(filename, bytes.buffer);
+
+            // Save stroke log
+            const logFilename = `debug_ocr_${timestamp}.txt`;
+            await this.app.vault.adapter.write(logFilename, this.strokeLogs.join('\n'));
+
+            new Notice(`Saved debug image: ${filename}`);
+            console.log(`Saved debug image to ${filename}`);
+        } catch (error) {
+            console.error(error);
+            new Notice("Failed to save debug image");
         }
     }
 }

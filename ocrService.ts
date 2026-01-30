@@ -105,8 +105,7 @@ export class OcrService {
             if (handwriting) {
                 await this.worker.setParameters({
                     tessedit_pageseg_mode: PSM.SINGLE_BLOCK, // Treat image as single block
-                    // Remove char whitelist to allow more flexibility
-                    // tessedit_min_orientation_margin helps with skewed handwriting
+                    tessedit_char_whitelist: 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.,!?-()\'" ',
                     tessedit_min_orientation_margin: '1',
                 });
             } else {

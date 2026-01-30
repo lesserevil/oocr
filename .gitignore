@@ -7,3 +7,5 @@ main.mjs
 
 # Downloaded assets
 dev-resources/
+dist/
+debug_captures/
