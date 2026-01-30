@@ -1,6 +1,6 @@
-OBSIDIAN_VAULT ?=
+OBSIDIAN_VAULT ?= 
 
-.PHONY: all build install
+.PHONY: all build install test
 
 all: build
 
@@ -20,3 +20,6 @@ install: build
 	mkdir -p "$(OBSIDIAN_VAULT)/.obsidian/plugins/oocr"
 	cp main.js manifest.json styles.css "$(OBSIDIAN_VAULT)/.obsidian/plugins/oocr/"
 	@echo "Success: Installed oocr plugin to $(OBSIDIAN_VAULT)/.obsidian/plugins/oocr/"
+
+test:
+	npm test

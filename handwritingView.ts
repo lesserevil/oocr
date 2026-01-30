@@ -183,7 +183,7 @@ export class HandwritingView extends ItemView {
         try {
             // Get Data URL (default PNG)
             const dataUrl = this.canvas.toDataURL("image/png");
-            const text = await this.ocrService.recognize(dataUrl);
+            const text = await this.ocrService.recognize(dataUrl, { handwriting: true });
 
             if (text.trim()) {
                 await navigator.clipboard.writeText(text);
@@ -209,7 +209,7 @@ export class HandwritingView extends ItemView {
 
         try {
             const dataUrl = this.canvas.toDataURL("image/png");
-            const text = await this.ocrService.recognize(dataUrl);
+            const text = await this.ocrService.recognize(dataUrl, { handwriting: true });
 
             if (text.trim()) {
                 // Find valid markdown view to insert into

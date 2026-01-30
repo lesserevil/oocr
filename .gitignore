@@ -1,3 +1,6 @@
 node_modules
-main.js
 .DS_Store
+# Build outputs
+main.js
+main.mjs
+*.js.map

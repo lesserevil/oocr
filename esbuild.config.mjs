@@ -12,11 +12,7 @@ if you want to view the source, please visit the github repository of this plugi
 
 const prod = (process.argv[2] === "production");
 
-const context = await esbuild.context({
-    banner: {
-        js: banner,
-    },
-    entryPoints: ["main.ts"],
+const commonConfig = {
     bundle: true,
     external: [
         "obsidian",
@@ -33,17 +29,24 @@ const context = await esbuild.context({
         "@lezer/highlight",
         "@lezer/lr",
         ...builtins],
-    format: "cjs",
-    target: "es2018",
     logLevel: "info",
     sourcemap: prod ? false : "inline",
     treeShaking: true,
+};
+
+const mainContext = await esbuild.context({
+    ...commonConfig,
+    banner: { js: banner },
+    entryPoints: ["main.ts"],
     outfile: "main.js",
+    format: "cjs",
+    target: "es2018",
 });
 
+
 if (prod) {
-    await context.rebuild();
+    await mainContext.rebuild();
     process.exit(0);
 } else {
-    await context.watch();
+    await mainContext.watch();
 }
