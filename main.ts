@@ -8,7 +8,7 @@ export default class OOCRPlugin extends Plugin {
 
     async onload() {
         console.log('Loading OOCR plugin');
-        this.ocrService = new OcrService();
+        this.ocrService = new OcrService(this.app);
 
         this.registerView(
             HANDWRITING_VIEW_TYPE,

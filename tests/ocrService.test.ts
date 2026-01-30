@@ -2,6 +2,13 @@ import { OcrService } from '../ocrService';
 import { createWorker } from 'tesseract.js';
 import { Notice } from 'obsidian';
 
+// Mock window for Node.js environment
+if (typeof window === 'undefined') {
+    (global as any).window = {
+        atob: (str: string) => Buffer.from(str, 'base64').toString('binary')
+    };
+}
+
 // Mock tesseract.js
 jest.mock('tesseract.js', () => ({
     createWorker: jest.fn(),
@@ -22,13 +29,34 @@ jest.mock('obsidian', () => ({
 describe('OcrService', () => {
     let service: OcrService;
     let mockWorker: any;
+    let mockApp: any;
 
     beforeEach(() => {
+        // Mock global Blob and URL
+        global.Blob = class {
+            constructor(public content: any[], public options: any) { }
+        } as any;
+        global.URL.createObjectURL = jest.fn().mockReturnValue('blob:worker-url');
+
         // Create mock worker
         mockWorker = {
             recognize: jest.fn(),
             setParameters: jest.fn(),
             terminate: jest.fn(),
+        };
+
+        // Create mock App
+        mockApp = {
+            vault: {
+                adapter: {
+                    exists: jest.fn().mockResolvedValue(true),
+                    getResourcePath: jest.fn().mockImplementation((path: string) => `app://resource/${path}`),
+                    read: jest.fn().mockResolvedValue('worker-content'),
+                    append: jest.fn(),
+                    write: jest.fn(),
+                },
+                configDir: '.obsidian'
+            }
         };
 
         // Setup createWorker mock
@@ -37,7 +65,7 @@ describe('OcrService', () => {
             data: { text: 'Recognized Text' },
         });
 
-        service = new OcrService();
+        service = new OcrService(mockApp);
     });
 
     afterEach(() => {
@@ -77,9 +105,9 @@ describe('OcrService', () => {
         await service.recognize(dataUrl);
 
         expect(mockWorker.recognize).toHaveBeenCalled();
-        // The arg should be a Buffer, not the original data URL
+        // The arg should be a Uint8Array (standard Web API), not a Buffer (Node.js)
         const callArg = (mockWorker.recognize as jest.Mock).mock.calls[0][0];
-        expect(Buffer.isBuffer(callArg)).toBe(true);
+        expect(callArg instanceof Uint8Array).toBe(true);
     });
 
     test('should throw error on recognition failure', async () => {
