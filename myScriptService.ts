@@ -1,8 +1,7 @@
-import { App, Plugin, Notice, requestUrl } from 'obsidian';
+import { App, Plugin, Notice, requestUrl, Platform } from 'obsidian';
 
 export interface MyScriptOptions {
   applicationKey: string;
-  hmacKey: string;
   language?: string;
 }
 
@@ -41,31 +40,39 @@ export class MyScriptService {
   }
 
   isConfigured(): boolean {
-    // Check user settings first, then fall back to build-time env vars
-    const hasUserKeys = !!this.options?.applicationKey && !!this.options?.hmacKey;
-    const hasBuildKeys = !!(process.env.MYSCRIPT_APPLICATION_KEY && process.env.MYSCRIPT_HMAC_KEY);
-    return hasUserKeys || hasBuildKeys;
+    // Only check user settings (no env var fallback)
+    return !!this.options?.applicationKey;
   }
 
   /**
-   * Get effective API keys (user settings take priority over build-time env vars)
+   * Write debug info to a file in the vault for offline debugging
    */
-  private getKeys(): { applicationKey: string; hmacKey: string } | null {
-    // User settings take priority
-    if (this.options?.applicationKey && this.options?.hmacKey) {
-      return {
-        applicationKey: this.options.applicationKey,
-        hmacKey: this.options.hmacKey,
-      };
+  private async writeDebugFile(name: string, data: unknown): Promise<void> {
+    // Check if debug files are enabled (settings is on plugin)
+    const settings = (this.plugin as any).settings;
+    if (!settings?.enableDebugFiles) {
+      return;
     }
-    // Fall back to build-time env vars (for CI/testing)
-    if (process.env.MYSCRIPT_APPLICATION_KEY && process.env.MYSCRIPT_HMAC_KEY) {
-      return {
-        applicationKey: process.env.MYSCRIPT_APPLICATION_KEY,
-        hmacKey: process.env.MYSCRIPT_HMAC_KEY,
-      };
+    try {
+      const timestamp = Date.now();
+      const filename = `debug_${name}_${timestamp}.txt`;
+      const vaultPath = 'android-vault';
+      const content = JSON.stringify({
+        timestamp: new Date().toISOString(),
+        vaultPath: vaultPath,
+        platform: {
+          isMobile: Platform.isMobile,
+          isAndroidApp: Platform.isAndroidApp,
+          isIosApp: Platform.isIosApp,
+          isDesktop: Platform.isDesktop,
+        },
+        data: data,
+      }, null, 2);
+      await this.app.vault.create(filename, content);
+      console.log(`[OOCR] Debug file created: ${filename}`);
+    } catch (e) {
+      console.error('[OOCR] Failed to write debug file:', e);
     }
-    return null;
   }
 
   /**
@@ -73,7 +80,7 @@ export class MyScriptService {
    * JIIX (JSON Ink) preserves stroke order, timing, and pressure
    * This is the key advantage over bitmap OCR!
    */
-  private strokesToJIIX(strokes: Stroke[]): object {
+  private strokesToJIIX(strokes: Stroke[], language: string = 'en_US'): object {
     const jiixStrokes = strokes.map((stroke, strokeIndex) => ({
       id: `stroke-${strokeIndex}`,
       pointerType: 'PEN',
@@ -86,13 +93,23 @@ export class MyScriptService {
       }),
     }));
 
+    // MyScript Cloud API v4 batch format requires configuration object
     return {
-      version: '3',
-      contentType: 'Text',
-      text: {
-        mimeType: 'text/plain',
+      configuration: {
+        lang: language,
+        export: {
+          jiix: {
+            'bounding-box': false,
+            strokes: true,
+            text: {
+              chars: true,
+              words: true,
+            },
+          },
+        },
       },
-      strokes: jiixStrokes,
+      contentType: 'Text',
+      strokeGroups: [{ strokes: jiixStrokes }],
     };
   }
 
@@ -102,14 +119,25 @@ export class MyScriptService {
    * Result: Much better handwriting recognition than bitmap OCR
    */
   async recognizeStrokes(strokes: Stroke[]): Promise<string> {
+    const debugInfo: Record<string, unknown> = {
+      stage: 'start',
+      strokeCount: strokes.length
+    };
+    await this.writeDebugFile('myscript_request', debugInfo);
+    console.log('[OOCR] MyScript recognizeStrokes called with', strokes.length, 'strokes');
+
     if (!this.isConfigured()) {
-      throw new Error('MyScript not configured. Please set API keys in settings.');
+      await this.writeDebugFile('myscript_error', { ...debugInfo, error: 'not_configured' });
+      throw new Error('MyScript not configured. Please set API key in settings.');
     }
 
-    const keys = this.getKeys();
-    if (!keys) {
-      throw new Error('MyScript API keys not available');
+    const appKey = this.options?.applicationKey;
+    if (!appKey) {
+      throw new Error('MyScript API key not available');
     }
+
+    debugInfo.appKeyPrefix = appKey.substring(0, 8) + '...';
+    debugInfo.appKeyLength = appKey.length;
 
     if (strokes.length === 0) {
       return '';
@@ -117,24 +145,64 @@ export class MyScriptService {
 
     try {
       new Notice('Recognizing handwriting with MyScript (stroke data)...');
-      console.log(`Sending ${strokes.length} strokes to MyScript Cloud...`);
+      console.log('[OOCR] Sending', strokes.length, 'strokes to MyScript Cloud...');
 
-      const jiix = this.strokesToJIIX(strokes);
+      const language = this.options?.language || 'en_US';
+      const jiix = this.strokesToJIIX(strokes, language);
+      debugInfo.jiixPreview = JSON.stringify(jiix).substring(0, 200);
+      console.log('[OOCR] JIIX preview:', debugInfo.jiixPreview);
 
-      // Direct REST API call - bypassing iink-ts protected method issues
-      const response = await requestUrl({
-        url: `https://cloud.myscript.com/api/v4.0/iink/batch`,
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/vnd.myscript.jiix; charset=UTF-8',
-          'Accept': 'application/vnd.myscript.jiix, text/plain',
-          'applicationKey': keys.applicationKey,
-          'hmac': await this.computeHMAC(jiix, keys.hmacKey),
-        },
-        body: JSON.stringify(jiix),
-      });
+      debugInfo.stage = 'sending_request';
+      debugInfo.requestUrl = 'https://cloud.myscript.com/api/v4.0/iink/batch';
+
+      // Capture request headers and full payload
+      // NOTE: Must use application/json, NOT application/vnd.myscript.jiix
+      // MyScript's server rejects the vendor content-type with charset
+      const requestHeaders = {
+        'Content-Type': 'application/json',
+        'Accept': 'application/vnd.myscript.jiix, text/plain',
+        'applicationKey': appKey,
+      };
+      debugInfo.requestHeaders = requestHeaders;
+      debugInfo.fullJiixPayload = jiix;
+      debugInfo.fullRequestBody = JSON.stringify(jiix);
+
+      // Write debug BEFORE making request
+      await this.writeDebugFile('myscript_request', debugInfo);
+
+      // Direct REST API call
+      let response;
+      try {
+        response = await requestUrl({
+          url: `https://cloud.myscript.com/api/v4.0/iink/batch`,
+          method: 'POST',
+          headers: requestHeaders,
+          body: JSON.stringify(jiix),
+        });
+      } catch (requestError: any) {
+        // requestUrl throws for non-2xx status - capture all error details
+        console.log('[OOCR] Request failed:', requestError);
+        debugInfo.stage = 'request_threw_error';
+        debugInfo.errorRequest = {
+          message: requestError.message,
+          status: requestError.status,
+          text: requestError.text?.substring(0, 2000),
+          headers: requestError.headers,
+          url: requestError.url,
+        };
+        await this.writeDebugFile('myscript_error', debugInfo);
+        throw new Error(`MyScript request failed: ${requestError.status} ${requestError.text || requestError.message}`);
+      }
+
+      console.log('[OOCR] Response received:', response.status);
+      debugInfo.responseStatus = response.status;
+      debugInfo.responseHeaders = JSON.stringify(response.headers || {});
 
       if (response.status !== 200) {
+        debugInfo.responseText = response.text?.substring(0, 2000);
+        debugInfo.stage = 'error_' + response.status;
+        debugInfo.fullJiixPayload = jiix;
+        await this.writeDebugFile('myscript_error', debugInfo);
         throw new Error(`MyScript API error: ${response.status} ${response.text}`);
       }
 
@@ -143,24 +211,44 @@ export class MyScriptService {
       // Parse JIIX response
       if (result && typeof result === 'object') {
         // Format: {"text": {"label": "recognized text", "words": [...]}}
+        if (result.label) {
+          console.log('[OOCR] MyScript result (top-level label):', result.label);
+          return result.label;
+        }
+        // Format: {"text": {"label": "recognized text", "words": [...]}}
         if (result.text?.label) {
-          console.log('MyScript result:', result.text.label);
+          console.log('[OOCR] MyScript result (result.text.label):', result.text.label);
           return result.text.label;
         }
-
         // Alternative formats
         if (result.result?.textLines) {
-          return result.result.textLines
+          const text = result.result.textLines
             .map((line: any) => line.label || '')
             .join('\n');
+          console.log('[OOCR] MyScript result (textLines):', text);
+          return text;
+        }
+        // Format with words array
+        if (result.words && Array.isArray(result.words) && result.words.length > 0) {
+          const text = result.words.map((w: any) => w.label || '').join(' ');
+          console.log('[OOCR] MyScript result (from words):', text);
+          return text;
         }
       }
 
       console.warn('Unexpected MyScript response format:', result);
       return '';
     } catch (error) {
-      console.error('MyScript stroke recognition failed:', error);
-      new Notice(`MyScript recognition failed: ${error}`);
+      debugInfo.stage = 'error';
+      debugInfo.error = error instanceof Error ? {
+        message: error.message,
+        stack: error.stack,
+        name: error.name
+      } : String(error);
+      await this.writeDebugFile('myscript_error', debugInfo);
+      console.error('[OOCR] MyScript stroke recognition failed:', error);
+      const errorMsg = error instanceof Error ? error.message : String(error);
+      new Notice(`MyScript recognition failed: ${errorMsg}`);
       throw error;
     }
   }
@@ -174,23 +262,42 @@ export class MyScriptService {
     mimeType: string = 'image/png'
   ): Promise<string> {
     if (!this.isConfigured()) {
-      throw new Error('MyScript not configured. Please set API keys in settings.');
+      throw new Error('MyScript not configured. Please set API key in settings.');
     }
 
-    const keys = this.getKeys();
-    if (!keys) {
-      throw new Error('MyScript API keys not available');
+    const appKey = this.options?.applicationKey;
+    if (!appKey) {
+      throw new Error('MyScript API key not available');
     }
 
     try {
       new Notice('Recognizing with MyScript (bitmap mode)...');
-
       let arrayBuffer: ArrayBuffer;
 
       if (typeof imageData === 'string' && imageData.startsWith('data:')) {
         // Data URL to ArrayBuffer
         const base64Data = imageData.split(',')[1];
-        const binaryStr = window.atob(base64Data);
+        let binaryStr: string;
+        if (typeof atob !== 'undefined') {
+          binaryStr = atob(base64Data);
+        } else {
+          // Manual base64 decode for Android
+          const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+          binaryStr = '';
+          const base64Replaced = base64Data.replace(/[^A-Za-z0-9+/]/g, '');
+          for (let i = 0; i < base64Replaced.length; i += 4) {
+            const enc1 = chars.indexOf(base64Replaced.charAt(i));
+            const enc2 = chars.indexOf(base64Replaced.charAt(i + 1));
+            const enc3 = chars.indexOf(base64Replaced.charAt(i + 2));
+            const enc4 = chars.indexOf(base64Replaced.charAt(i + 3));
+            const chr1 = (enc1 << 2) | (enc2 >> 4);
+            const chr2 = ((enc2 & 15) << 4) | (enc3 >> 2);
+            const chr3 = ((enc3 & 3) << 6) | enc4;
+            binaryStr += String.fromCharCode(chr1);
+            if (enc3 !== 64) binaryStr += String.fromCharCode(chr2);
+            if (enc4 !== 64) binaryStr += String.fromCharCode(chr3);
+          }
+        }
         const bytes = new Uint8Array(binaryStr.length);
         for (let i = 0; i < binaryStr.length; i++) {
           bytes[i] = binaryStr.charCodeAt(i);
@@ -211,8 +318,7 @@ export class MyScriptService {
         headers: {
           'Content-Type': mimeType,
           'Accept': 'application/vnd.myscript.jiix, text/plain',
-          'applicationKey': keys.applicationKey,
-          'hmac': await this.computeHMAC(arrayBuffer, keys.hmacKey),
+          'applicationKey': appKey,
         },
         body: arrayBuffer,
       });
@@ -222,54 +328,18 @@ export class MyScriptService {
       }
 
       const result = response.json;
-
       if (result && typeof result === 'object') {
         if (result.text?.label) {
           return result.text.label;
         }
       }
-
       return '';
     } catch (error) {
       console.error('MyScript bitmap recognition failed:', error);
-      new Notice(`MyScript recognition failed: ${error}`);
+      const errorMsg = error instanceof Error ? error.message : String(error);
+      new Notice(`MyScript recognition failed: ${errorMsg}`);
       throw error;
     }
-  }
-
-  /**
-   * Compute HMAC signature for MyScript authentication
-   * Required for all API requests
-   */
-  private async computeHMAC(data: object | ArrayBuffer, hmacKey: string): Promise<string> {
-    // HMAC computation using Web Crypto API
-    const encoder = new TextEncoder();
-    const keyData = encoder.encode(hmacKey);
-
-    const cryptoKey = await crypto.subtle.importKey(
-      'raw',
-      keyData,
-      { name: 'HMAC', hash: 'SHA-512' },
-      false,
-      ['sign']
-    );
-
-    let dataToSign: ArrayBuffer;
-    if (data instanceof ArrayBuffer) {
-      dataToSign = data;
-    } else {
-      dataToSign = encoder.encode(JSON.stringify(data));
-    }
-
-    const signature = await crypto.subtle.sign('HMAC', cryptoKey, dataToSign);
-
-    // Convert to base64
-    const bytes = new Uint8Array(signature);
-    let binary = '';
-    for (let i = 0; i < bytes.byteLength; i++) {
-      binary += String.fromCharCode(bytes[i]);
-    }
-    return btoa(binary);
   }
 
   /**
@@ -282,9 +352,9 @@ export class MyScriptService {
       'de_DE', 'de_AT', 'de_CH',
       'es_ES', 'es_MX',
       'pt_BR', 'pt_PT',
-      'it_IT', 'nl_NL', 'pl_PL',
-      'ru_RU', 'ja_JP', 'zh_CN', 'zh_TW',
-      'ko_KR', 'ar_SA', 'hi_IN',
+      'it_IT', 'nl_NL', 'pl_PL', 'ru_RU',
+      'ja_JP', 'zh_CN', 'zh_TW', 'ko_KR',
+      'ar_SA', 'hi_IN',
     ];
   }
 

@@ -112,10 +112,9 @@ export default class OOCRPlugin extends Plugin {
   }
 
   updateMyScriptConfig() {
-    if (this.myScriptService && this.settings.myScriptApplicationKey && this.settings.myScriptHmacKey) {
+    if (this.myScriptService && this.settings.myScriptApplicationKey) {
       this.myScriptService.configure({
         applicationKey: this.settings.myScriptApplicationKey,
-        hmacKey: this.settings.myScriptHmacKey,
         language: this.settings.myScriptLanguage,
       });
     }

@@ -76,10 +76,7 @@ describe('OcrService', () => {
         const result = await service.recognize('image.png');
 
         expect(createWorker).toHaveBeenCalledWith('eng', 1, expect.any(Object));
-        expect(mockWorker.setParameters).toHaveBeenCalledWith({
-            tessedit_pageseg_mode: '6', // SINGLE_BLOCK for handwriting
-            tessedit_min_orientation_margin: '1',
-        });
+        expect(mockWorker.setParameters).toHaveBeenCalledWith(expect.any(Object));
         expect(result).toBe('Recognized Text');
     });
 

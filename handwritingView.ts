@@ -21,7 +21,8 @@ export class HandwritingView extends ItemView {
   // Stroke capture for MyScript
   private currentStroke: CapturedStroke | null = null;
   private capturedStrokes: CapturedStroke[] = [];
-  private strokeStartTime: number = 0;
+  private sessionStartTime: number = 0;  // First stroke start time (for cumulative timestamps)
+  private strokeStartTime: number = 0;  // Current stroke start time
 
   // Debug/logging
   private pressureValues: number[] = [];
@@ -129,12 +130,20 @@ export class HandwritingView extends ItemView {
       lastY = y;
 
       // Start new stroke capture
-      this.strokeStartTime = Date.now();
+      // Set session start time if this is the first stroke
+      const now = Date.now();
+      if (this.capturedStrokes.length === 0) {
+        this.sessionStartTime = now;
+        console.log('[OOCR] Session started at', this.sessionStartTime);
+      }
+      this.strokeStartTime = now;
+      const t = now - this.sessionStartTime;
+      console.log('[OOCR] Stroke', this.capturedStrokes.length, 'started at t=', t);
       this.currentStroke = {
         points: [{
           x: x,
           y: y,
-          t: 0,
+          t: t,
           p: e.pressure !== undefined && e.pressure > 0 ? e.pressure : 0.5
         }]
       };
@@ -164,7 +173,7 @@ export class HandwritingView extends ItemView {
         this.currentStroke.points.push({
           x: x,
           y: y,
-          t: Date.now() - this.strokeStartTime,
+          t: Date.now() - this.sessionStartTime,
           p: pressure
         });
       }
@@ -287,6 +296,7 @@ export class HandwritingView extends ItemView {
 
     // Clear captured strokes
     this.capturedStrokes = [];
+      this.sessionStartTime = 0; this.strokeStartTime = 0;
     this.currentStroke = null;
     this.updateStrokeInfo();
   }
@@ -421,7 +431,10 @@ export class HandwritingView extends ItemView {
       if (markdownView) {
         const editor = markdownView.editor;
         const cursor = editor.getCursor();
-        editor.replaceRange(text, cursor);
+        // Normalize to single line: replace newlines with spaces, trim
+        const singleLineText = text.replace(/\n+/g, ' ').trim();
+        const textToInsert = this.plugin.settings.addNewlineAfterInsert ? singleLineText + '\n' : singleLineText;
+        editor.replaceRange(textToInsert, cursor);
         new Notice('Inserted text!');
       } else {
         // Fallback: copy to clipboard

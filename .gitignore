@@ -1,6 +1,7 @@
 node_modules
 .DS_Store
 .env
+.env.test
 # Build outputs
 main.js
 main.mjs
