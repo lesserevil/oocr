@@ -21,6 +21,7 @@
         "@types/jest": "^30.0.0",
         "@types/node": "^16.11.6",
         "builtin-modules": "^5.0.0",
+        "dotenv": "^17.2.3",
         "esbuild": "^0.19.0",
         "jest": "^30.2.0",
         "obsidian": "latest",
@@ -29,6 +30,7 @@
         "typescript": "^4.7.4"
     },
     "dependencies": {
+        "iink-ts": "^3.2.1",
         "tesseract.js": "^5.1.1"
     }
 }
