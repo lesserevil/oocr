@@ -435,6 +435,10 @@ export class HandwritingView extends ItemView {
         const singleLineText = text.replace(/\n+/g, ' ').trim();
         const textToInsert = this.plugin.settings.addNewlineAfterInsert ? singleLineText + '\n' : singleLineText;
         editor.replaceRange(textToInsert, cursor);
+        const newLine = cursor.line + (textToInsert.split('\n').length - 1);
+        const lastLineContent = textToInsert.split('\n').pop() || '';
+        const newCh = textToInsert.includes('\n') ? lastLineContent.length : cursor.ch + textToInsert.length;
+        editor.setCursor({ line: newLine, ch: newCh });
         new Notice('Inserted text!');
       } else {
         // Fallback: copy to clipboard
